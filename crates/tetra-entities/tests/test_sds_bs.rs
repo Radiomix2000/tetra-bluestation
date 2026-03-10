@@ -8,6 +8,7 @@ use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, debug};
 use tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier;
 use tetra_pdus::cmce::pdus::u_sds_data::USdsData;
 use tetra_pdus::cmce::pdus::u_status::UStatus;
+use tetra_saps::control::enums::sds_user_data::SdsUserData;
 use tetra_saps::control::sds::CmceSdsData;
 use tetra_saps::lcmc::LcmcMleUnitdataInd;
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
@@ -21,7 +22,7 @@ fn register_subscriber(test: &mut ComponentTest, issi: u32) {
 
 /// Helper: affiliate a subscriber with a GSSI in the StackState subscriber registry
 fn affiliate_subscriber(test: &mut ComponentTest, issi: u32, gssi: u32) {
-    test.config.state_write().subscribers.affiliate(issi, gssi);
+    test.config.state_write().subscribers.affiliate(issi, gssi).unwrap();
 }
 
 /// Helper: build a U-SDS-DATA message from a source ISSI to a dest SSI with 16-bit payload
@@ -32,12 +33,7 @@ fn build_u_sds_data_msg(dltime: TdmaTime, source_issi: u32, dest_ssi: u32, paylo
         called_party_short_number_address: None,
         called_party_ssi: Some(dest_ssi as u64),
         called_party_extension: None,
-        short_data_type_identifier: 0,
-        user_defined_data_1: Some(payload as u64),
-        user_defined_data_2: None,
-        user_defined_data_3: None,
-        length_indicator: None,
-        user_defined_data_4: None,
+        user_defined_data: SdsUserData::Type1(payload),
         external_subscriber_number: None,
         dm_ms_address: None,
     };
@@ -169,9 +165,7 @@ fn test_sds_from_brew_to_local() {
         msg: SapMsgInner::CmceSdsData(CmceSdsData {
             source_issi: 3000001,
             dest_issi: 2000001,
-            short_data_type_identifier: 0,
-            data: vec![0xCA, 0xFE],
-            length_bits: 16,
+            user_defined_data: SdsUserData::Type1(0xCAFE),
         }),
     };
     test.submit_message(msg);
@@ -202,9 +196,7 @@ fn test_sds_from_brew_unregistered() {
         msg: SapMsgInner::CmceSdsData(CmceSdsData {
             source_issi: 3000001,
             dest_issi: 9999999,
-            short_data_type_identifier: 0,
-            data: vec![0xDE, 0xAD],
-            length_bits: 16,
+            user_defined_data: SdsUserData::Type1(0xDEAD),
         }),
     };
     test.submit_message(msg);

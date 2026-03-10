@@ -3,6 +3,7 @@ use core::fmt;
 use crate::cmce::enums::{cmce_pdu_type_ul::CmcePduTypeUl, party_type_identifier::PartyTypeIdentifier, type3_elem_id::CmceType3ElemId};
 use tetra_core::typed_pdu_fields::*;
 use tetra_core::{BitBuffer, expect_pdu_type, pdu_parse_error::PduParseErr};
+use tetra_saps::control::enums::sds_user_data::SdsUserData;
 
 /// Representation of the U-SDS-DATA PDU (Clause 14.7.2.8).
 /// This PDU shall be for sending user defined SDS data.
@@ -26,18 +27,8 @@ pub struct USdsData {
     pub called_party_ssi: Option<u64>,
     /// Conditional 24 bits, See note 2, condition: called_party_type_identifier == 2
     pub called_party_extension: Option<u64>,
-    /// Type1, 2 bits, See note 4,
-    pub short_data_type_identifier: u8,
-    /// Conditional 16 bits, See note 2, condition: short_data_type_identifier == 0
-    pub user_defined_data_1: Option<u64>,
-    /// Conditional 32 bits, See note 2, condition: short_data_type_identifier == 1
-    pub user_defined_data_2: Option<u64>,
-    /// Conditional 64 bits, See note 2, condition: short_data_type_identifier == 2
-    pub user_defined_data_3: Option<u64>,
-    /// Conditional 11 bits, See note 2, condition: short_data_type_identifier == 3
-    pub length_indicator: Option<u64>,
-    /// Conditional See note 2, condition: short_data_type_identifier == 3
-    pub user_defined_data_4: Option<Vec<u8>>,
+    /// Either type1, type2, type3 or type4 user data field.
+    pub user_defined_data: SdsUserData,
     /// Type3, External subscriber number
     pub external_subscriber_number: Option<Type3FieldGeneric>,
     /// Type3, DM-MS address
@@ -77,43 +68,25 @@ impl USdsData {
         } else {
             None
         };
+
         // Type1
         let short_data_type_identifier = buffer.read_field(2, "short_data_type_identifier")? as u8;
-        // Conditional
-        let user_defined_data_1 = if short_data_type_identifier == 0 {
-            Some(buffer.read_field(16, "user_defined_data_1")?)
-        } else {
-            None
-        };
-        // Conditional
-        let user_defined_data_2 = if short_data_type_identifier == 1 {
-            Some(buffer.read_field(32, "user_defined_data_2")?)
-        } else {
-            None
-        };
-        // Conditional
-        let user_defined_data_3 = if short_data_type_identifier == 2 {
-            Some(buffer.read_field(64, "user_defined_data_3")?)
-        } else {
-            None
-        };
-        // Conditional
-        let length_indicator = if short_data_type_identifier == 3 {
-            Some(buffer.read_field(11, "length_indicator")?)
-        } else {
-            None
-        };
-        // Conditional
-        let user_defined_data_4 = if short_data_type_identifier == 3 {
-            let len_bits = length_indicator.unwrap() as usize;
-            let num_bytes = (len_bits + 7) / 8;
-            let mut data = vec![0u8; num_bytes];
-            buffer.read_bits_into_slice(len_bits, &mut data).ok_or(PduParseErr::BufferEnded {
-                field: Some("user_defined_data_4"),
-            })?;
-            Some(data)
-        } else {
-            None
+        let user_defined_data = match short_data_type_identifier {
+            0 => SdsUserData::Type1(buffer.read_field(16, "user_defined_data_1")? as u16),
+            1 => SdsUserData::Type2(buffer.read_field(32, "user_defined_data_2")? as u32),
+            2 => SdsUserData::Type3(buffer.read_field(64, "user_defined_data_3")?),
+            3 => {
+                let len_bits = buffer.read_field(11, "length_indicator")? as u16;
+                let num_bytes = (len_bits as usize + 7) / 8;
+                let mut data = vec![0u8; num_bytes];
+                buffer
+                    .read_bits_into_slice(len_bits as usize, &mut data)
+                    .ok_or(PduParseErr::BufferEnded {
+                        field: Some("user_defined_data_4"),
+                    })?;
+                SdsUserData::Type4(len_bits, data)
+            }
+            _ => unreachable!(),
         };
 
         // obit designates presence of any further type2, type3 or type4 fields
@@ -137,12 +110,7 @@ impl USdsData {
             called_party_short_number_address,
             called_party_ssi,
             called_party_extension,
-            short_data_type_identifier,
-            user_defined_data_1,
-            user_defined_data_2,
-            user_defined_data_3,
-            length_indicator,
-            user_defined_data_4,
+            user_defined_data,
             external_subscriber_number,
             dm_ms_address,
         })
@@ -168,34 +136,25 @@ impl USdsData {
         if let Some(ref value) = self.called_party_extension {
             buffer.write_bits(*value, 24);
         }
+
         // Type1
-        buffer.write_bits(self.short_data_type_identifier as u64, 2);
-        // Conditional
-        if let Some(ref value) = self.user_defined_data_1 {
-            buffer.write_bits(*value, 16);
-        }
-        // Conditional
-        if let Some(ref value) = self.user_defined_data_2 {
-            buffer.write_bits(*value, 32);
-        }
-        // Conditional
-        if let Some(ref value) = self.user_defined_data_3 {
-            buffer.write_bits(*value, 64);
-        }
-        // Conditional
-        if let Some(ref value) = self.length_indicator {
-            buffer.write_bits(*value, 11);
-        }
-        // Conditional
-        if let Some(ref data) = self.user_defined_data_4 {
-            let len_bits = self.length_indicator.unwrap() as usize;
-            let full_bytes = len_bits / 8;
-            let remaining_bits = len_bits % 8;
-            for i in 0..full_bytes {
-                buffer.write_bits(data[i] as u64, 8);
-            }
-            if remaining_bits > 0 {
-                buffer.write_bits((data[full_bytes] >> (8 - remaining_bits)) as u64, remaining_bits);
+        let short_data_type_identifier = self.user_defined_data.type_identifier();
+        buffer.write_bits(short_data_type_identifier as u64, 2);
+
+        match &self.user_defined_data {
+            SdsUserData::Type1(value) => buffer.write_bits(*value as u64, 16),
+            SdsUserData::Type2(value) => buffer.write_bits(*value as u64, 32),
+            SdsUserData::Type3(value) => buffer.write_bits(*value, 64),
+            SdsUserData::Type4(len_bits, data) => {
+                buffer.write_bits(*len_bits as u64, 11);
+                let full_bytes = (*len_bits as usize) / 8;
+                let remaining_bits = len_bits % 8;
+                for i in 0..full_bytes {
+                    buffer.write_bits(data[i] as u64, 8);
+                }
+                if remaining_bits > 0 {
+                    buffer.write_bits((data[full_bytes] >> (8 - remaining_bits)) as u64, remaining_bits as usize);
+                }
             }
         }
 
@@ -222,18 +181,13 @@ impl fmt::Display for USdsData {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "USdsData {{ area_selection: {:?} called_party_type_identifier: {:?} called_party_short_number_address: {:?} called_party_ssi: {:?} called_party_extension: {:?} short_data_type_identifier: {:?} user_defined_data_1: {:?} user_defined_data_2: {:?} user_defined_data_3: {:?} length_indicator: {:?} user_defined_data_4: {:?} external_subscriber_number: {:?} dm_ms_address: {:?} }}",
+            "USdsData {{ area_selection: {:?} called_party_type_identifier: {:?} called_party_short_number_address: {:?} called_party_ssi: {:?} called_party_extension: {:?} user_defined_data: {:?} external_subscriber_number: {:?} dm_ms_address: {:?} }}",
             self.area_selection,
             self.called_party_type_identifier,
             self.called_party_short_number_address,
             self.called_party_ssi,
             self.called_party_extension,
-            self.short_data_type_identifier,
-            self.user_defined_data_1,
-            self.user_defined_data_2,
-            self.user_defined_data_3,
-            self.length_indicator,
-            self.user_defined_data_4,
+            self.user_defined_data,
             self.external_subscriber_number,
             self.dm_ms_address,
         )
@@ -260,12 +214,7 @@ mod tests {
             called_party_short_number_address: None,
             called_party_ssi: Some(1000001),
             called_party_extension: None,
-            short_data_type_identifier: 0,
-            user_defined_data_1: Some(0xCAFE),
-            user_defined_data_2: None,
-            user_defined_data_3: None,
-            length_indicator: None,
-            user_defined_data_4: None,
+            user_defined_data: SdsUserData::Type1(0xCAFE),
             external_subscriber_number: None,
             dm_ms_address: None,
         };
@@ -274,8 +223,7 @@ mod tests {
         assert_eq!(parsed.called_party_type_identifier, PartyTypeIdentifier::Ssi);
         assert_eq!(parsed.called_party_ssi, Some(1000001));
         assert_eq!(parsed.called_party_extension, None);
-        assert_eq!(parsed.short_data_type_identifier, 0);
-        assert_eq!(parsed.user_defined_data_1, Some(0xCAFE));
+        assert_eq!(parsed.user_defined_data, SdsUserData::Type1(0xCAFE));
     }
 
     #[test]
@@ -287,21 +235,14 @@ mod tests {
             called_party_short_number_address: None,
             called_party_ssi: Some(2000002),
             called_party_extension: None,
-            short_data_type_identifier: 3,
-            user_defined_data_1: None,
-            user_defined_data_2: None,
-            user_defined_data_3: None,
-            length_indicator: Some(24), // 3 bytes
-            user_defined_data_4: Some(payload.clone()),
+            user_defined_data: SdsUserData::Type4(24, payload.clone()),
             external_subscriber_number: None,
             dm_ms_address: None,
         };
         let parsed = round_trip(&pdu);
         assert_eq!(parsed.area_selection, 5);
         assert_eq!(parsed.called_party_ssi, Some(2000002));
-        assert_eq!(parsed.short_data_type_identifier, 3);
-        assert_eq!(parsed.length_indicator, Some(24));
-        assert_eq!(parsed.user_defined_data_4, Some(payload));
+        assert_eq!(parsed.user_defined_data, SdsUserData::Type4(24, payload));
     }
 
     #[test]
@@ -312,12 +253,7 @@ mod tests {
             called_party_short_number_address: Some(42),
             called_party_ssi: None,
             called_party_extension: None,
-            short_data_type_identifier: 1,
-            user_defined_data_1: None,
-            user_defined_data_2: Some(0x12345678),
-            user_defined_data_3: None,
-            length_indicator: None,
-            user_defined_data_4: None,
+            user_defined_data: SdsUserData::Type2(0x12345678),
             external_subscriber_number: None,
             dm_ms_address: None,
         };
@@ -325,7 +261,7 @@ mod tests {
         assert_eq!(parsed.called_party_type_identifier, PartyTypeIdentifier::Sna);
         assert_eq!(parsed.called_party_short_number_address, Some(42));
         assert_eq!(parsed.called_party_ssi, None);
-        assert_eq!(parsed.user_defined_data_2, Some(0x12345678));
+        assert_eq!(parsed.user_defined_data, SdsUserData::Type2(0x12345678));
     }
 
     #[test]
@@ -336,12 +272,7 @@ mod tests {
             called_party_short_number_address: None,
             called_party_ssi: Some(3000003),
             called_party_extension: Some(0xABCDEF),
-            short_data_type_identifier: 2,
-            user_defined_data_1: None,
-            user_defined_data_2: None,
-            user_defined_data_3: Some(0x0102030405060708),
-            length_indicator: None,
-            user_defined_data_4: None,
+            user_defined_data: SdsUserData::Type3(0x0102030405060708),
             external_subscriber_number: None,
             dm_ms_address: None,
         };
@@ -349,7 +280,6 @@ mod tests {
         assert_eq!(parsed.called_party_type_identifier, PartyTypeIdentifier::Tsi);
         assert_eq!(parsed.called_party_ssi, Some(3000003));
         assert_eq!(parsed.called_party_extension, Some(0xABCDEF));
-        assert_eq!(parsed.short_data_type_identifier, 2);
-        assert_eq!(parsed.user_defined_data_3, Some(0x0102030405060708));
+        assert_eq!(parsed.user_defined_data, SdsUserData::Type3(0x0102030405060708));
     }
 }

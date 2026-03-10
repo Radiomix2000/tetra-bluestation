@@ -5,6 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use tetra_saps::control::enums::sds_user_data::SdsUserData;
+use tetra_saps::control::sds::CmceSdsData;
 use uuid::Uuid;
 
 use crate::{MessageQueue, TetraEntityTrait};
@@ -1069,7 +1071,7 @@ impl BrewEntity {
         );
 
         // Brew always sends SDS Type 4 (variable length) per protocol spec
-        let short_data_type_identifier = 3;
+        let user_defined_data = SdsUserData::Type4(length_bits, data);
 
         // Forward to CMCE SDS subentity for downlink delivery
         queue.push_back(SapMsg {
@@ -1077,18 +1079,16 @@ impl BrewEntity {
             src: TetraEntity::Brew,
             dest: TetraEntity::Cmce,
             dltime: self.dltime,
-            msg: SapMsgInner::CmceSdsData(tetra_saps::control::sds::CmceSdsData {
+            msg: SapMsgInner::CmceSdsData(CmceSdsData {
                 source_issi: source,
                 dest_issi: destination,
-                short_data_type_identifier,
-                data,
-                length_bits,
+                user_defined_data,
             }),
         });
     }
 
     /// Handle outgoing SDS from CMCE → Brew (local MS → network)
-    fn handle_sds_send(&self, sds: tetra_saps::control::sds::CmceSdsData) {
+    fn handle_sds_send(&self, sds: CmceSdsData) {
         if !self.connected {
             tracing::warn!(
                 "BrewEntity: not connected, dropping outgoing SDS {} -> {}",
@@ -1100,20 +1100,20 @@ impl BrewEntity {
 
         let uuid = Uuid::new_v4();
         tracing::info!(
-            "BrewEntity: sending SDS uuid={} src={} dst={} type={} {} bytes",
+            "BrewEntity: sending SDS uuid={} src={} dst={} type={} {} bits",
             uuid,
             sds.source_issi,
             sds.dest_issi,
-            sds.short_data_type_identifier,
-            sds.data.len()
+            sds.user_defined_data.type_identifier(),
+            sds.user_defined_data.length_bits()
         );
 
         let _ = self.command_sender.send(BrewCommand::SendSds {
             uuid,
             source: sds.source_issi,
             destination: sds.dest_issi,
-            data: sds.data,
-            length_bits: sds.length_bits,
+            data: sds.user_defined_data.to_arr(),
+            length_bits: sds.user_defined_data.length_bits(),
         });
     }
 }

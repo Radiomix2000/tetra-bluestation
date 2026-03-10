@@ -1,5 +1,6 @@
 use tetra_config::bluestation::SharedConfig;
 use tetra_core::{BitBuffer, Sap, SsiType, TetraAddress, tetra_entities::TetraEntity, unimplemented_log};
+use tetra_saps::control::enums::sds_user_data::SdsUserData;
 use tetra_saps::control::sds::CmceSdsData;
 use tetra_saps::lcmc::LcmcMleUnitdataReq;
 use tetra_saps::{SapMsg, SapMsgInner};
@@ -34,7 +35,7 @@ impl SdsBsSubentity {
 
         let pdu = match USdsData::from_bitbuf(&mut prim.sdu) {
             Ok(pdu) => {
-                tracing::debug!("<- U-SDS-DATA {:?}", pdu);
+                tracing::debug!("<- {:?}", pdu);
                 pdu
             }
             Err(e) => {
@@ -57,37 +58,8 @@ impl SdsBsSubentity {
             "SDS: U-SDS-DATA from ISSI {} to ISSI {}, type={}",
             source_ssi,
             dest_ssi,
-            pdu.short_data_type_identifier
+            pdu.user_defined_data.type_identifier()
         );
-
-        // Extract SDS payload into a uniform representation
-        let (data, length_bits) = match pdu.short_data_type_identifier {
-            0 => {
-                // Type 1: 16 bits
-                let val = pdu.user_defined_data_1.unwrap_or(0);
-                (val.to_be_bytes()[6..8].to_vec(), 16u16)
-            }
-            1 => {
-                // Type 2: 32 bits
-                let val = pdu.user_defined_data_2.unwrap_or(0);
-                (val.to_be_bytes()[4..8].to_vec(), 32u16)
-            }
-            2 => {
-                // Type 3: 64 bits
-                let val = pdu.user_defined_data_3.unwrap_or(0);
-                (val.to_be_bytes().to_vec(), 64u16)
-            }
-            3 => {
-                // Type 4: variable length
-                let len_bits = pdu.length_indicator.unwrap_or(0) as u16;
-                let data = pdu.user_defined_data_4.unwrap_or_default();
-                (data, len_bits)
-            }
-            _ => {
-                tracing::warn!("SDS: invalid short_data_type_identifier={}", pdu.short_data_type_identifier);
-                return;
-            }
-        };
 
         // Route: local delivery (ISSI or GSSI), Brew forward, or drop
         let is_local_issi = self.config.state_read().subscribers.is_registered(dest_ssi);
@@ -95,28 +67,10 @@ impl SdsBsSubentity {
 
         if is_local_issi {
             tracing::info!("SDS: local delivery: {} -> {}", source_ssi, dest_ssi);
-            self.send_d_sds_data(
-                queue,
-                message.dltime,
-                source_ssi,
-                dest_ssi,
-                SsiType::Issi,
-                pdu.short_data_type_identifier,
-                &data,
-                length_bits,
-            );
+            self.send_d_sds_data(queue, message.dltime, source_ssi, dest_ssi, SsiType::Issi, pdu.user_defined_data);
         } else if is_local_group {
             tracing::info!("SDS: group delivery: {} -> GSSI {}", source_ssi, dest_ssi);
-            self.send_d_sds_data(
-                queue,
-                message.dltime,
-                source_ssi,
-                dest_ssi,
-                SsiType::Gssi,
-                pdu.short_data_type_identifier,
-                &data,
-                length_bits,
-            );
+            self.send_d_sds_data(queue, message.dltime, source_ssi, dest_ssi, SsiType::Gssi, pdu.user_defined_data);
         } else if brew::is_active(&self.config)
             && (brew::is_brew_issi_routable(&self.config, dest_ssi) || brew::is_tetrapack_sds_service_issi(&self.config, dest_ssi))
         {
@@ -129,9 +83,7 @@ impl SdsBsSubentity {
                 msg: SapMsgInner::CmceSdsData(CmceSdsData {
                     source_issi: source_ssi,
                     dest_issi: dest_ssi,
-                    short_data_type_identifier: pdu.short_data_type_identifier,
-                    data,
-                    length_bits,
+                    user_defined_data: pdu.user_defined_data,
                 }),
             });
         } else {
@@ -149,8 +101,8 @@ impl SdsBsSubentity {
             "SDS: received from Brew: {} -> {}, type={}, {} bits",
             sds.source_issi,
             sds.dest_issi,
-            sds.short_data_type_identifier,
-            sds.length_bits
+            sds.user_defined_data.type_identifier(),
+            sds.user_defined_data.length_bits()
         );
 
         if !self.config.state_read().subscribers.is_registered(sds.dest_issi) {
@@ -165,9 +117,7 @@ impl SdsBsSubentity {
             sds.source_issi,
             sds.dest_issi,
             SsiType::Issi,
-            sds.short_data_type_identifier,
-            &sds.data,
-            sds.length_bits,
+            sds.user_defined_data,
         );
     }
 
@@ -182,7 +132,7 @@ impl SdsBsSubentity {
 
         let pdu = match UStatus::from_bitbuf(&mut prim.sdu) {
             Ok(pdu) => {
-                tracing::debug!("<- U-STATUS {:?}", pdu);
+                tracing::debug!("<- {:?}", pdu);
                 pdu
             }
             Err(e) => {
@@ -276,54 +226,13 @@ impl SdsBsSubentity {
         source_issi: u32,
         dest_issi: u32,
         dest_ssi_type: SsiType,
-        short_data_type_identifier: u8,
-        data: &[u8],
-        length_bits: u16,
+        user_defined_data: SdsUserData,
     ) {
-        // Build D-SDS-DATA PDU
-        let (user_defined_data_1, user_defined_data_2, user_defined_data_3, length_indicator, user_defined_data_4) =
-            match short_data_type_identifier {
-                0 => {
-                    let val = if data.len() >= 2 {
-                        ((data[0] as u64) << 8) | (data[1] as u64)
-                    } else if data.len() == 1 {
-                        (data[0] as u64) << 8
-                    } else {
-                        0
-                    };
-                    (Some(val), None, None, None, None)
-                }
-                1 => {
-                    let mut val: u64 = 0;
-                    for (i, &b) in data.iter().take(4).enumerate() {
-                        val |= (b as u64) << (24 - i * 8);
-                    }
-                    (None, Some(val), None, None, None)
-                }
-                2 => {
-                    let mut val: u64 = 0;
-                    for (i, &b) in data.iter().take(8).enumerate() {
-                        val |= (b as u64) << (56 - i * 8);
-                    }
-                    (None, None, Some(val), None, None)
-                }
-                3 => (None, None, None, Some(length_bits as u64), Some(data.to_vec())),
-                _ => {
-                    tracing::warn!("SDS: invalid short_data_type_identifier={}", short_data_type_identifier);
-                    return;
-                }
-            };
-
         let pdu = DSdsData {
             calling_party_type_identifier: PartyTypeIdentifier::Ssi,
             calling_party_address_ssi: Some(source_issi as u64),
             calling_party_extension: None,
-            short_data_type_identifier,
-            user_defined_data_1,
-            user_defined_data_2,
-            user_defined_data_3,
-            length_indicator,
-            user_defined_data_4,
+            user_defined_data,
             external_subscriber_number: None,
             dm_ms_address: None,
         };
