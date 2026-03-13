@@ -1197,12 +1197,16 @@ impl UmacBs {
         };
         pdu.update_len_and_fill_ind(sdu.get_len());
 
-        // Per ETSI EN 300 392-2 Clause 23.3.1.1.2: idle MSes monitor the MCCH (slot 1)
-        // for signaling. Without common SCCHs, all MSes listen on slot 1.
-        // All signaling on the normal path (non-FACCH) must go to the MCCH.
-        let enqueue_ts = 1;
+        // // Per ETSI EN 300 392-2 Clause 23.3.1.1.2: idle MSes monitor the MCCH (slot 1)
+        // // for signaling. Without common SCCHs, all MSes listen on slot 1.
+        // // All signaling on the normal path (non-FACCH) must go to the MCCH.
+        if message.dltime.t != 1 {
+            tracing::warn!("rx_ul_tma_unitdata_req: signaling scheduled for non-MCCH {}", message.dltime.t);
+        }
+        self.channel_scheduler.dl_enqueue_tma(message.dltime.t, pdu, sdu, prim.tx_reporter);
 
-        self.channel_scheduler.dl_enqueue_tma(enqueue_ts, pdu, sdu, prim.tx_reporter);
+        // let enqueue_ts = 1;
+        // self.channel_scheduler.dl_enqueue_tma(enqueue_ts, pdu, sdu, prim.tx_reporter);
     }
 
     fn rx_tma_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {

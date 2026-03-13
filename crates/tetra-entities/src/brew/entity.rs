@@ -1086,11 +1086,12 @@ impl BrewEntity {
         let user_defined_data = SdsUserData::Type4(length_bits, data);
 
         // Forward to CMCE SDS subentity for downlink delivery
+        // Set dltime to next ts1 to ensure it gets sent on MCCH
         queue.push_back(SapMsg {
             sap: Sap::Control,
             src: TetraEntity::Brew,
             dest: TetraEntity::Cmce,
-            dltime: self.dltime,
+            dltime: self.dltime.forward_to_timeslot(1),
             msg: SapMsgInner::CmceSdsData(CmceSdsData {
                 source_issi: source,
                 dest_issi: destination,

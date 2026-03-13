@@ -112,10 +112,10 @@ impl SdsBsSubentity {
             return;
         }
 
-        // Send D-SDS-DATA downlink to the local MS
+        // Send D-SDS-DATA downlink to the local MS. Schedule on next ts1 to ensure it gets sent on the MCCH
         self.send_d_sds_data(
             queue,
-            message.dltime,
+            message.dltime.forward_to_timeslot(1),
             sds.source_issi,
             sds.dest_issi,
             SsiType::Issi,
