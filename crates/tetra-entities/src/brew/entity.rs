@@ -1080,15 +1080,18 @@ impl BrewEntity {
             return;
         }
 
-        // Brew always sends SDS Type 4 (variable length) per protocol spec
+        // Brew protocol always delivers SDS as variable-length (Type 4). This means the
+        // downlink D-SDS-DATA will use SDTI=3, even if the original uplink was a 16-bit
+        // pre-coded status (SDTI=0 / Type 1). This is a Brew protocol constraint.
         let user_defined_data = SdsUserData::Type4(length_bits, data);
 
         // Forward to CMCE SDS subentity for downlink delivery
+        // Set dltime to next ts1 to ensure it gets sent on MCCH
         queue.push_back(SapMsg {
             sap: Sap::Control,
             src: TetraEntity::Brew,
             dest: TetraEntity::Cmce,
-            dltime: self.dltime,
+            dltime: self.dltime.forward_to_timeslot(1),
             msg: SapMsgInner::CmceSdsData(CmceSdsData {
                 source_issi: source,
                 dest_issi: destination,
@@ -1096,9 +1099,12 @@ impl BrewEntity {
             }),
         });
 
-        // Send SDS_REPORT (status=0) back to Brew server to complete the 3-message handshake
+        // Send SDS_REPORT (status=0) back to Brew to release session resources.
+        // Without this, sessions are killed by timeout instead of being released cleanly.
+        // TODO: should be sent after the radio ACKs on the air interface (LLC BL-ACK),
+        // currently sent immediately after queuing for delivery.
         let _ = self.command_sender.send(BrewCommand::SendSdsReport { uuid, status: 0 });
-        tracing::debug!("BrewEntity: queued SDS_REPORT uuid={} status=0", uuid);
+        tracing::info!("BrewEntity: SDS_REPORT uuid={} status=0 -> Brew", uuid);
     }
 
     /// Handle outgoing SDS from CMCE → Brew (local MS → network)

@@ -623,12 +623,21 @@ impl BrewWorker {
                 };
                 match cmd {
                     BrewCommand::RegisterSubscriber { issi } => {
+                        let already_registered = self.subscriber_groups.contains_key(&issi);
                         self.subscriber_groups.entry(issi).or_insert_with(HashSet::new);
-                        let msg = build_subscriber_register(issi, &[]);
+                        let msg = if already_registered {
+                            build_subscriber_reregister(issi)
+                        } else {
+                            build_subscriber_register(issi, &[])
+                        };
                         if let Err(e) = ws.send(Message::Binary(msg.into())) {
                             tracing::error!("BrewWorker: failed to send registration: {}", e);
                         } else {
-                            tracing::debug!("BrewWorker: sent REGISTER issi={}", issi);
+                            tracing::debug!(
+                                "BrewWorker: sent {} issi={}",
+                                if already_registered { "REREGISTER" } else { "REGISTER" },
+                                issi
+                            );
                         }
                     }
                     BrewCommand::DeregisterSubscriber { issi } => {
@@ -700,6 +709,11 @@ impl BrewWorker {
                         data,
                         length_bits,
                     } => {
+                        if !brew::feature_sds_enabled(&self.config) {
+                            tracing::warn!("BrewWorker: ignoring SendSds command because SDS over Brew is disabled in config");
+                            continue;
+                        }
+
                         // Send SHORT_TRANSFER first (header with source/dest)
                         let short_msg = build_short_transfer(&uuid, source, destination);
                         if let Err(e) = ws.send(Message::Binary(short_msg.into())) {
@@ -716,6 +730,11 @@ impl BrewWorker {
                         }
                     }
                     BrewCommand::SendSdsReport { uuid, status } => {
+                        if !brew::feature_sds_enabled(&self.config) {
+                            tracing::warn!("BrewWorker: ignoring SendSdsReport command because SDS over Brew is disabled in config");
+                            continue;
+                        }
+
                         let msg = build_sds_report(&uuid, status);
                         if let Err(e) = ws.send(Message::Binary(msg.into())) {
                             tracing::warn!("BrewWorker: failed to send SDS_REPORT: {}", e);

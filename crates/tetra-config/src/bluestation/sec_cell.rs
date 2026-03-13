@@ -164,7 +164,7 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
             .unwrap_or(SortedDisjointSsiRanges::from_vec_ssirange(vec![])),
         home_mode_display: ci.home_mode_display.map(|h| CfgHomeModeDisplay {
             source_issi: h.source_issi.unwrap_or(0),
-            interval_frames: h.interval_frames.unwrap_or(18),
+            interval_frames: h.interval_frames.unwrap_or(96),
             protocol_id: h.protocol_id.unwrap_or(220),
             text_coding_scheme: h.text_coding_scheme.unwrap_or(HomeModeDisplaySdsTextCodingScheme::LATIN),
             text: h.text.unwrap_or_default(),
