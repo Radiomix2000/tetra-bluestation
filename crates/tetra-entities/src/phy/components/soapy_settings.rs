@@ -54,7 +54,9 @@ pub fn get_device_arguments(io_cfg: &SoapySdrIoCfg, mode: Mode) -> Vec<(String, 
     // Additional device arguments for devices that need them
     match driver {
         "plutosdr" => {
-            //&io_cfg.iocfg_pluto
+            args.push(("direct".to_string(), "1".to_string()));
+            args.push(("timestamp_every".to_string(), "1500".to_string()));
+            //cfg = &io_cfg.iocfg_pluto
         },
         _ => { },
     }
