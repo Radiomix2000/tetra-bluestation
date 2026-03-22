@@ -10,6 +10,7 @@ use crate::mm::components::client_state::{MmClientMgr, MmClientState};
 use crate::mm::components::not_supported::make_ul_mm_pdu_function_not_supported;
 use tetra_pdus::mm::enums::location_update_type::LocationUpdateType;
 use tetra_pdus::mm::enums::mm_pdu_type_ul::MmPduTypeUl;
+use tetra_pdus::mm::enums::status_downlink::StatusDownlink;
 use tetra_pdus::mm::enums::status_uplink::StatusUplink;
 use tetra_pdus::mm::fields::group_identity_attachment::GroupIdentityAttachment;
 use tetra_pdus::mm::fields::group_identity_downlink::GroupIdentityDownlink;
@@ -18,6 +19,7 @@ use tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink;
 use tetra_pdus::mm::pdus::d_attach_detach_group_identity_acknowledgement::DAttachDetachGroupIdentityAcknowledgement;
 use tetra_pdus::mm::pdus::d_location_update_accept::DLocationUpdateAccept;
 use tetra_pdus::mm::pdus::d_location_update_command::DLocationUpdateCommand;
+use tetra_pdus::mm::pdus::d_mm_status::DMmStatus;
 use tetra_pdus::mm::pdus::u_attach_detach_group_identity::UAttachDetachGroupIdentity;
 use tetra_pdus::mm::pdus::u_itsi_detach::UItsiDetach;
 use tetra_pdus::mm::pdus::u_location_update_demand::ULocationUpdateDemand;
@@ -276,29 +278,135 @@ impl MmBs {
                 pdu
             }
             Err(e) => {
-                tracing::warn!("Failed parsing UItsiDetach: {:?} {}", e, prim.sdu.dump_bin());
+                tracing::warn!("Failed parsing UMmStatus: {:?} {}", e, prim.sdu.dump_bin());
                 return;
             }
         };
 
-        let handled = false; // Set to true for properly handled U-MM STATUS messages
+        let issi = prim.received_address.ssi;
+        let handle = prim.handle;
+        let dltime = message.dltime;
+
+        let mut handled = false;
         match pdu.status_uplink {
+            // --- DMO Gateway requests (EN 300 396-5) ---
+            StatusUplink::RequestToStartDmGatewayOperation => {
+                let dm_ms_ssis = Self::parse_gateway_dm_ms_addresses(
+                    pdu.status_uplink_dependent_information,
+                    pdu.status_uplink_dependent_information_len,
+                );
+                tracing::info!(
+                    "MM: gateway start request from ISSI {} with {} DM-MS addresses: {:?}",
+                    issi,
+                    dm_ms_ssis.len(),
+                    dm_ms_ssis
+                );
+                self.config.state_write().subscribers.register_gateway(issi, dm_ms_ssis);
+                self.send_d_mm_status_gateway(
+                    queue,
+                    dltime,
+                    issi,
+                    handle,
+                    DMmStatus::new_acceptance_with_addresses(
+                        StatusDownlink::AcceptanceToStartDmGatewayOperation,
+                        Vec::new(), // Accept all addresses
+                    ),
+                );
+                handled = true;
+            }
+            StatusUplink::RequestToContinuedmGatewayOperation => {
+                let retained = self.config.state_read().subscribers.is_gateway(issi);
+                let dm_ms_ssis = Self::parse_gateway_dm_ms_addresses(
+                    pdu.status_uplink_dependent_information,
+                    pdu.status_uplink_dependent_information_len,
+                );
+                tracing::info!(
+                    "MM: gateway continue request from ISSI {} (retained={}) with {} DM-MS addresses",
+                    issi,
+                    retained,
+                    dm_ms_ssis.len()
+                );
+                if !dm_ms_ssis.is_empty() {
+                    self.config.state_write().subscribers.add_dm_ms_addresses(issi, dm_ms_ssis);
+                }
+                self.send_d_mm_status_gateway(queue, dltime, issi, handle, DMmStatus::new_acceptance_continue(retained));
+                handled = true;
+            }
+            StatusUplink::RequestToStopDmGatewayOperation => {
+                tracing::info!("MM: gateway stop request from ISSI {}", issi);
+                self.config.state_write().subscribers.deregister_gateway(issi);
+                self.send_d_mm_status_gateway(
+                    queue,
+                    dltime,
+                    issi,
+                    handle,
+                    DMmStatus::new_simple(StatusDownlink::AcceptanceToStopDmGatewayOperation),
+                );
+                handled = true;
+            }
+            StatusUplink::RequestToAddDmMsAddresses => {
+                let dm_ms_ssis = Self::parse_gateway_dm_ms_addresses(
+                    pdu.status_uplink_dependent_information,
+                    pdu.status_uplink_dependent_information_len,
+                );
+                tracing::info!("MM: gateway add DM-MS addresses from ISSI {}: {:?}", issi, dm_ms_ssis);
+                self.config.state_write().subscribers.add_dm_ms_addresses(issi, dm_ms_ssis);
+                self.send_d_mm_status_gateway(
+                    queue,
+                    dltime,
+                    issi,
+                    handle,
+                    DMmStatus::new_acceptance_with_addresses(StatusDownlink::AcceptanceOfDmMsAddresses, Vec::new()),
+                );
+                handled = true;
+            }
+            StatusUplink::RequestToRemoveDmMsAddresses => {
+                let dm_ms_ssis = Self::parse_gateway_dm_ms_addresses(
+                    pdu.status_uplink_dependent_information,
+                    pdu.status_uplink_dependent_information_len,
+                );
+                tracing::info!("MM: gateway remove DM-MS addresses from ISSI {}: {:?}", issi, dm_ms_ssis);
+                self.config.state_write().subscribers.remove_dm_ms_addresses(issi, dm_ms_ssis);
+                self.send_d_mm_status_gateway(
+                    queue,
+                    dltime,
+                    issi,
+                    handle,
+                    DMmStatus::new_acceptance_with_addresses(StatusDownlink::AcceptanceOfDmMsAddresses, Vec::new()),
+                );
+                handled = true;
+            }
+            StatusUplink::RequestToReplaceDmMsAddresses => {
+                let dm_ms_ssis = Self::parse_gateway_dm_ms_addresses(
+                    pdu.status_uplink_dependent_information,
+                    pdu.status_uplink_dependent_information_len,
+                );
+                tracing::info!("MM: gateway replace DM-MS addresses from ISSI {}: {:?}", issi, dm_ms_ssis);
+                self.config.state_write().subscribers.replace_dm_ms_addresses(issi, dm_ms_ssis);
+                self.send_d_mm_status_gateway(
+                    queue,
+                    dltime,
+                    issi,
+                    handle,
+                    DMmStatus::new_acceptance_with_addresses(StatusDownlink::AcceptanceOfDmMsAddresses, Vec::new()),
+                );
+                handled = true;
+            }
+            // MS responses to BTS-initiated commands (we don't send these yet, just acknowledge)
+            StatusUplink::AcceptanceToRemovalOfDmMsAddresses
+            | StatusUplink::AcceptanceToChangeRegistrationLabel
+            | StatusUplink::AcceptanceToStopDmGatewayOperation => {
+                tracing::info!("MM: gateway acknowledgement from ISSI {}: {:?}", issi, pdu.status_uplink);
+                handled = true;
+            }
+            // Non-gateway U-MM STATUS types
             StatusUplink::ChangeOfEnergySavingModeRequest
             | StatusUplink::ChangeOfEnergySavingModeResponse
             | StatusUplink::DualWatchModeRequest
             | StatusUplink::TerminatingDualWatchModeRequest
             | StatusUplink::ChangeOfDualWatchModeResponse
             | StatusUplink::StartOfDirectModeOperation
-            | StatusUplink::MsFrequencyBandsInformation
-            | StatusUplink::RequestToStartDmGatewayOperation
-            | StatusUplink::RequestToContinuedmGatewayOperation
-            | StatusUplink::RequestToStopDmGatewayOperation
-            | StatusUplink::RequestToAddDmMsAddresses
-            | StatusUplink::RequestToRemoveDmMsAddresses
-            | StatusUplink::RequestToReplaceDmMsAddresses
-            | StatusUplink::AcceptanceToRemovalOfDmMsAddresses
-            | StatusUplink::AcceptanceToChangeRegistrationLabel
-            | StatusUplink::AcceptanceToStopDmGatewayOperation => {
+            | StatusUplink::MsFrequencyBandsInformation => {
                 unimplemented_log!("{:?}", pdu.status_uplink)
             }
             _ => {
@@ -307,15 +415,8 @@ impl MmBs {
         }
 
         if !handled {
-            // A fairly untested, best-effort way of sending a PDU not supported error back
-            // Note that an MS is not required to really do anything with this message.
-            let (sapmsg, debug_str) = make_ul_mm_pdu_function_not_supported(
-                prim.handle,
-                MmPduTypeUl::UMmStatus,
-                Some((6, pdu.status_uplink.into())),
-                prim.received_address.ssi,
-                message.dltime,
-            );
+            let (sapmsg, debug_str) =
+                make_ul_mm_pdu_function_not_supported(handle, MmPduTypeUl::UMmStatus, Some((6, pdu.status_uplink.into())), issi, dltime);
             tracing::debug!("-> {}", debug_str);
             queue.push_back(sapmsg);
         }
@@ -557,6 +658,100 @@ impl MmBs {
         pdu.to_bitbuf(&mut sdu).unwrap();
         sdu.seek(0);
         tracing::debug!("-> DLocationUpdateCommand sdu {}", sdu.dump_bin());
+
+        let addr = TetraAddress {
+            encrypted: false,
+            ssi_type: SsiType::Ssi,
+            ssi: issi,
+        };
+        let msg = SapMsg {
+            sap: Sap::LmmSap,
+            src: TetraEntity::Mm,
+            dest: TetraEntity::Mle,
+            dltime,
+            msg: SapMsgInner::LmmMleUnitdataReq(LmmMleUnitdataReq {
+                sdu,
+                handle,
+                address: addr,
+                layer2service: 0,
+                stealing_permission: false,
+                stealing_repeats_flag: false,
+                encryption_flag: false,
+                is_null_pdu: false,
+                tx_reporter: None,
+            }),
+        };
+        queue.push_back(msg);
+    }
+
+    /// Parse DM-MS addresses from a gateway U-MM STATUS sub-PDU's dependent information.
+    /// Sub-PDU layout: 8 reserved bits + 4-bit count + N × (2-bit address_type + 24-bit SSI).
+    /// We only support address_type 0 (SSI only).
+    fn parse_gateway_dm_ms_addresses(info: Option<u64>, info_len: Option<usize>) -> Vec<u32> {
+        let Some(raw) = info else {
+            return Vec::new();
+        };
+        let Some(len) = info_len else {
+            return Vec::new();
+        };
+
+        // Reconstruct a BitBuffer from the raw bits
+        let mut buf = BitBuffer::new_autoexpand(len);
+        buf.write_bits(raw, len);
+        buf.seek(0);
+
+        // Skip 8 reserved bits
+        if len < 12 {
+            return Vec::new();
+        }
+        let _ = buf.read_field(8, "reserved");
+
+        // Read 4-bit count
+        let count = match buf.read_field(4, "number_of_dm_ms_addresses") {
+            Ok(c) => c as u8,
+            Err(_) => return Vec::new(),
+        };
+
+        if count == 0 {
+            return Vec::new();
+        }
+
+        let mut addresses = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            // address_type (2 bits) + SSI (24 bits) = 26 bits per address
+            let addr_type = match buf.read_field(2, "dm_ms_address_type") {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            let ssi = match buf.read_field(24, "dm_ms_ssi") {
+                Ok(s) => s as u32,
+                Err(_) => break,
+            };
+
+            if addr_type != 0 {
+                tracing::warn!(
+                    "MM: unsupported DM-MS address type {} (only SSI/type 0 supported), skipping",
+                    addr_type
+                );
+                continue;
+            }
+
+            addresses.push(ssi);
+        }
+
+        addresses
+    }
+
+    /// Build and send a D-MM STATUS gateway response PDU to a local MS.
+    fn send_d_mm_status_gateway(&self, queue: &mut MessageQueue, dltime: TdmaTime, issi: u32, handle: u32, pdu: DMmStatus) {
+        tracing::debug!("-> {}", pdu);
+
+        let mut sdu = BitBuffer::new_autoexpand(32);
+        if let Err(e) = pdu.to_bitbuf(&mut sdu) {
+            tracing::error!("Failed to serialize D-MM STATUS: {:?}", e);
+            return;
+        }
+        sdu.seek(0);
 
         let addr = TetraAddress {
             encrypted: false,
